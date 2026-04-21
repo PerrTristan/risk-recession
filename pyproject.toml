@@ -1,0 +1,30 @@
+[project]
+name = "recession-risk-dashboard"
+version = "0.2.0"
+description = "Pipeline d'analyse du risque de récession basé sur les données FRED"
+requires-python = ">=3.12"
+
+dependencies = [
+    "requests>=2.31",        # Appels HTTP vers l'API FRED
+    "pandas>=2.2",           # Manipulation des séries temporelles
+    "duckdb>=0.10",          # Base de données analytique locale
+    "plotly>=5.20",          # Graphiques interactifs
+    "rich>=13.7",            # Affichage console amélioré (tableaux, couleurs)
+    "python-dotenv>=1.0",    # Chargement des variables d'environnement (.env)
+]
+
+[project.optional-dependencies]
+dev = [
+    "jupyter>=1.0",          # Pour les notebooks Jupyter
+    "quarto>=0.1",           # Pour les notebooks Quarto (si wrapper Python disponible)
+    "pytest>=8.0",           # Tests unitaires
+    "ruff>=0.4",             # Linter et formateur de code
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

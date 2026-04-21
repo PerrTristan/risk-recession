@@ -1,0 +1,219 @@
+---
+title: "Guide Utilisateur — Recession Risk Dashboard"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    theme: flatly
+    embed-resources: true
+---
+
+## Vue d'ensemble
+
+Ce projet est un **pipeline Python complet** pour analyser le risque de récession
+aux États-Unis à partir de données macro-économiques officielles (FRED).
+
+Il est structuré en trois composantes :
+
+| Composante               | Fichier                     | Rôle |
+|--------------------------|-----------------------------|------|
+| Pipeline de données      | `data/build_fred.py`        | Télécharge et stocke les séries FRED dans DuckDB |
+| Moteur d'analyse         | `src/recession_analysis.py` | Calcule le score de risque et génère les graphiques |
+| Notebooks d'analyse      | `notebooks/analysis.qmd`   | Exploration interactive des résultats |
+
+---
+
+## Prérequis
+
+### 1. Clé API FRED (gratuite)
+
+1. Créez un compte sur [FRED](https://fred.stlouisfed.org/docs/api/api_key.html)
+2. Demandez une clé API (approbation quasi-instantanée)
+3. Configurez la variable d'environnement :
+
+```bash
+# Option A : variable d'environnement
+export FRED_API_KEY="votre_cle_ici"
+
+# Option B : fichier .env à la racine du projet
+echo "FRED_API_KEY=votre_cle_ici" > .env
+```
+
+### 2. Dépendances Python
+
+```bash
+# Avec uv (recommandé — gestion d'environnement rapide)
+uv sync
+
+# Avec pip
+pip install requests pandas duckdb plotly rich python-dotenv
+```
+
+---
+
+## Démarrage rapide
+
+```bash
+# Étape 1 : Construire la base de données (environ 30 secondes)
+python data/build_fred.py
+
+# Étape 2 : Lancer l'analyse et voir le rapport
+python src/recession_analysis.py
+
+# Étape 3 : Générer le notebook HTML interactif
+quarto render notebooks/analysis.qmd
+```
+
+---
+
+## Utilisation avancée (Python)
+
+### Utiliser la classe `RecessionAnalyzer` directement
+
+```python
+from src.recession_analysis import RecessionAnalyzer
+
+# Initialiser
+analyzer = RecessionAnalyzer("data/fred_data.duckdb")
+
+# Charger les données
+analyzer.load_data()
+
+# Calculer le score (retourne un float entre 0 et 100)
+score = analyzer.compute_risk_score()
+print(f"Score : {score:.1f}/100 — {analyzer.report.risk_level}")
+
+# Afficher le rapport détaillé dans le terminal
+analyzer.print_report()
+
+# Ouvrir le dashboard Plotly dans le navigateur
+analyzer.plot_dashboard()
+
+# Ou sauvegarder en HTML
+analyzer.save_dashboard("mon_dashboard.html")
+```
+
+### Accéder aux données brutes
+
+```python
+# analyzer.data est un dict[series_id, pd.DataFrame]
+df_yield_curve = analyzer.data["T10Y2Y"]
+print(df_yield_curve.tail())
+
+# Récupérer la valeur actuelle de la courbe des taux
+current_spread = float(df_yield_curve["value"].iloc[-1])
+print(f"Spread 10Y-2Y : {current_spread:+.2f}%")
+```
+
+### Accéder aux signaux individuels
+
+```python
+# analyzer.report.signals contient la liste des IndicatorSignal
+for signal in analyzer.report.signals:
+    print(f"{signal.name:30s} signal={signal.signal:.2f}  contrib={signal.contribution:.1f}pts")
+```
+
+---
+
+## Indicateurs et méthodologie
+
+### Courbe des taux (poids : 25%)
+
+**Série FRED :** T10Y2Y (spread 10 ans - 2 ans)
+
+La courbe des taux est considérée comme le prédicteur le plus fiable de récession.
+Depuis 1955, chaque inversion prolongée de la courbe a précédé une récession
+(avec un délai de 6 à 18 mois).
+
+Signal = `max(0, min(1, (-spread + 1.5) / 3.0))`
+
+### Règle de Sahm (poids : 25%)
+
+**Série FRED :** SAHMREALTIME
+
+Formulée par l'économiste Claudia Sahm en 2019. La règle est déclenchée quand
+la moyenne mobile 3 mois du chômage dépasse de 0.5 pp son minimum sur 12 mois.
+A prédit chaque récession depuis 1970 sans faux positifs.
+
+Signal = `min(1.0, valeur / 0.5)`
+
+### Taux de chômage (poids : 15%)
+
+**Série FRED :** UNRATE
+
+Combine le niveau absolu (4% = normal, 8% = élevé) et le momentum
+sur 6 mois. Un chômage qui monte rapidement est plus inquiétant
+qu'un niveau absolument élevé mais stable.
+
+### Spread High Yield (poids : 15%)
+
+**Série FRED :** BAMLH0A0HYM2
+
+Mesure le stress sur les marchés du crédit. Un spread élevé indique
+que les investisseurs exigent une prime de risque importante,
+signal classique d'aversion au risque et de stress financier.
+
+### Confiance des consommateurs (poids : 10%)
+
+**Série FRED :** UMCSENT (Université du Michigan)
+
+Les ménages réduisent leurs dépenses quand ils anticipent une détérioration
+économique. Un recul brutal de la confiance précède souvent la récession.
+
+### Ventes au détail, emploi manufact., permis (5% + 3% + 2%)
+
+Ces trois indicateurs captent respectivement la demande courante,
+l'activité industrielle, et l'investissement résidentiel.
+Leurs poids plus faibles reflètent leur moindre pouvoir prédictif
+à horizon 6-18 mois.
+
+---
+
+## Structure de la base DuckDB
+
+```sql
+-- Données brutes
+SELECT * FROM fred_observations LIMIT 5;
+
+-- Métadonnées des séries
+SELECT * FROM fred_series_meta;
+
+-- Journal des mises à jour
+SELECT * FROM build_log ORDER BY run_at DESC;
+
+-- Dernières valeurs de chaque série
+SELECT series_id, MAX(date) as derniere_date, 
+       LAST(value ORDER BY date) as derniere_valeur
+FROM fred_observations
+GROUP BY series_id;
+```
+
+---
+
+## Mise à jour des données
+
+Pour mettre à jour les données (ex: mensuelle) :
+
+```bash
+python data/build_fred.py
+```
+
+Le script utilise `INSERT OR REPLACE` : les observations existantes sont
+mises à jour, les nouvelles sont ajoutées. Pas de doublons.
+
+---
+
+## Limitations et avertissements
+
+> ⚠️ **Ce dashboard est un outil d'analyse, pas une recommandation financière.**
+
+- Les indicateurs économiques sont révisés rétrospectivement par les agences
+  statistiques (BLS, Census Bureau). Les premières publications peuvent être
+  sensiblement différentes des chiffres définitifs.
+- La règle de Sahm et la courbe des taux sont les deux indicateurs les plus
+  robustes empiriquement, mais aucun indicateur n'est infaillible.
+- Le score composite utilise des poids fixés manuellement basés sur la littérature
+  académique. Ces poids ne sont pas calibrés sur données historiques.
+- Les récessions sont officiellement datées par le NBER avec un délai de plusieurs
+  mois — ce dashboard offre une vue en temps réel, non rétrospective.

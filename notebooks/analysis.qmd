@@ -1,0 +1,331 @@
+---
+title: "Recession Risk Dashboard — Analyse détaillée"
+author: "Recession Risk Pipeline"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-summary: "Voir le code"
+    theme: cosmo
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+## Introduction
+
+Ce notebook présente l'analyse complète du risque de récession aux États-Unis,
+basée sur 8 indicateurs macro-économiques provenant de la base FRED
+(Federal Reserve Economic Data).
+
+Le pipeline calcule un **score composite de 0 à 100** :
+
+| Score | Niveau de risque | Interprétation |
+|-------|-----------------|----------------|
+| 0–30  | Faible          | Expansion économique normale |
+| 30–60 | Modéré          | Ralentissement possible |
+| 60–80 | Élevé           | Récession probable dans 6–12 mois |
+| 80+   | Critique        | Récession imminente |
+
+---
+
+## 1. Chargement des données
+
+```{python}
+import sys
+sys.path.append("..")  # Accès au module src/
+
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+from IPython.display import display
+
+from src.recession_analysis import RecessionAnalyzer
+
+# Initialiser l'analyseur
+analyzer = RecessionAnalyzer("../data/fred_data.duckdb")
+analyzer.load_data()
+
+# Afficher les séries disponibles
+series_info = []
+for sid, df in analyzer.data.items():
+    series_info.append({
+        "Série FRED": sid,
+        "N observations": len(df),
+        "Début": df.index.min().strftime("%Y-%m-%d"),
+        "Fin": df.index.max().strftime("%Y-%m-%d"),
+        "Dernière valeur": round(df["value"].iloc[-1], 3),
+    })
+
+display(pd.DataFrame(series_info).set_index("Série FRED"))
+```
+
+---
+
+## 2. Score de risque global
+
+```{python}
+# Calculer le score composite
+score = analyzer.compute_risk_score()
+report = analyzer.report
+
+print(f"Score de risque : {score:.1f} / 100")
+print(f"Niveau          : {report.risk_level}")
+print(f"Données au      : {report.data_as_of}")
+```
+
+### Jauge de risque
+
+```{python}
+fig = go.Figure(go.Indicator(
+    mode="gauge+number",
+    value=score,
+    title={"text": f"Risque de Récession — {report.risk_level}", "font": {"size": 18}},
+    gauge={
+        "axis": {"range": [0, 100]},
+        "bar":  {"color": "navy"},
+        "steps": [
+            {"range": [0, 30],   "color": "#2ecc71", "name": "Faible"},
+            {"range": [30, 60],  "color": "#f39c12", "name": "Modéré"},
+            {"range": [60, 80],  "color": "#e67e22", "name": "Élevé"},
+            {"range": [80, 100], "color": "#e74c3c", "name": "Critique"},
+        ],
+    },
+    number={"suffix": " / 100"},
+))
+fig.update_layout(height=350)
+fig.show()
+```
+
+---
+
+## 3. Détail des signaux
+
+```{python}
+# Tableau des contributions
+signal_data = [
+    {
+        "Indicateur":    s.name,
+        "Série FRED":    s.series_id,
+        "Valeur brute":  round(s.raw_value, 3) if not pd.isna(s.raw_value) else "N/A",
+        "Signal (0-1)":  round(s.signal, 3),
+        "Poids":         f"{s.weight:.0%}",
+        "Contribution":  f"{s.contribution:.2f} pts",
+        "Interprétation": s.interpretation,
+    }
+    for s in sorted(report.signals, key=lambda x: x.contribution, reverse=True)
+]
+
+df_signals = pd.DataFrame(signal_data).set_index("Indicateur")
+display(df_signals)
+```
+
+### Contributions au score composite
+
+```{python}
+# Bar chart des contributions
+sorted_signals = sorted(report.signals, key=lambda s: s.contribution)
+colors = [
+    "#2ecc71" if s.signal < 0.33 else
+    "#f39c12" if s.signal < 0.66 else
+    "#e74c3c"
+    for s in sorted_signals
+]
+
+fig = go.Figure(go.Bar(
+    x=[s.contribution for s in sorted_signals],
+    y=[s.name for s in sorted_signals],
+    orientation="h",
+    marker_color=colors,
+    text=[f"{s.contribution:.1f} pts" for s in sorted_signals],
+    textposition="outside",
+))
+fig.update_layout(
+    title="Contributions au score de risque (en points)",
+    xaxis_title="Points de contribution",
+    height=400,
+    template="plotly_white",
+)
+fig.show()
+```
+
+---
+
+## 4. Analyse des indicateurs clés
+
+### 4.1 Courbe des taux (T10Y2Y)
+
+La courbe des taux est considérée comme le **prédicteur le plus fiable** de récession.
+Lorsque le taux à 10 ans passe sous le taux à 2 ans (inversion), une récession suit
+généralement dans les 6 à 18 mois.
+
+```{python}
+if "T10Y2Y" in analyzer.data:
+    df = analyzer.data["T10Y2Y"].last("15Y")
+    fig = go.Figure()
+
+    # Zone négative en rouge
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["value"],
+        fill="tozeroy",
+        fillcolor="rgba(231, 76, 60, 0.15)",
+        line={"color": "#3498db", "width": 2},
+        name="Spread 10Y-2Y",
+    ))
+
+    # Ligne zéro
+    fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Inversion")
+
+    fig.update_layout(
+        title="Spread Courbe des Taux 10 ans - 2 ans (T10Y2Y)",
+        yaxis_title="%",
+        template="plotly_white",
+        hovermode="x unified",
+    )
+    fig.show()
+```
+
+### 4.2 Règle de Sahm
+
+La **Règle de Sahm** (Claudia Sahm, 2019) est déclenchée lorsque la moyenne mobile
+à 3 mois du taux de chômage dépasse de **0.5 point de pourcentage** son minimum
+des 12 mois précédents. Elle a prédit toutes les récessions depuis 1970 avec une
+très faible latence.
+
+```{python}
+if "SAHMREALTIME" in analyzer.data:
+    df = analyzer.data["SAHMREALTIME"].last("15Y")
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["value"],
+        line={"color": "#e74c3c", "width": 2},
+        name="Indice Sahm",
+        fill="tozeroy",
+        fillcolor="rgba(231, 76, 60, 0.1)",
+    ))
+
+    # Seuil de déclenchement
+    fig.add_hline(
+        y=0.5,
+        line_dash="dot",
+        line_color="darkred",
+        line_width=2,
+        annotation_text="Seuil de récession (0.5)",
+    )
+
+    fig.update_layout(
+        title="Règle de Sahm — Indicateur de récession précoce",
+        yaxis_title="Points de % au-dessus du minimum sur 12 mois",
+        template="plotly_white",
+    )
+    fig.show()
+```
+
+### 4.3 Taux de chômage
+
+```{python}
+if "UNRATE" in analyzer.data:
+    df = analyzer.data["UNRATE"].last("20Y")
+    fig = px.line(
+        df.reset_index(), x="date", y="value",
+        title="Taux de Chômage US (UNRATE)",
+        labels={"value": "%", "date": ""},
+        template="plotly_white",
+    )
+    fig.update_traces(line_color="#9b59b6", line_width=2)
+    fig.show()
+```
+
+### 4.4 Spread High Yield
+
+```{python}
+if "BAMLH0A0HYM2" in analyzer.data:
+    df = analyzer.data["BAMLH0A0HYM2"].last("15Y")
+    fig = px.line(
+        df.reset_index(), x="date", y="value",
+        title="Spread High Yield ICE BofA (BAMLH0A0HYM2)",
+        labels={"value": "%", "date": ""},
+        template="plotly_white",
+        color_discrete_sequence=["#e67e22"],
+    )
+    fig.update_layout(
+        shapes=[{
+            "type": "line", "x0": df.index.min(), "x1": df.index.max(),
+            "y0": 5, "y1": 5,
+            "line": {"dash": "dot", "color": "red"},
+        }]
+    )
+    fig.show()
+```
+
+---
+
+## 5. Corrélations entre indicateurs
+
+```{python}
+# Aligner les séries mensuelles pour la matrice de corrélation
+monthly_series = ["UNRATE", "SAHMREALTIME", "RSAFS", "MANEMP", "PERMIT", "UMCSENT"]
+dfs = []
+for sid in monthly_series:
+    if sid in analyzer.data:
+        df = analyzer.data[sid]["value"].rename(sid)
+        dfs.append(df)
+
+if len(dfs) > 1:
+    combined = pd.concat(dfs, axis=1).dropna()
+    corr = combined.corr()
+
+    fig = px.imshow(
+        corr,
+        text_auto=True,
+        color_continuous_scale="RdBu_r",
+        zmin=-1, zmax=1,
+        title="Matrice de corrélation des indicateurs (données mensuelles)",
+    )
+    fig.update_layout(height=450, template="plotly_white")
+    fig.show()
+```
+
+---
+
+## 6. Conclusion
+
+```{python}
+# Résumé final
+print("=" * 55)
+print(f"  SCORE DE RISQUE DE RÉCESSION : {score:.1f} / 100")
+print(f"  NIVEAU : {report.risk_level.upper()}")
+print("=" * 55)
+
+if score < 30:
+    conclusion = (
+        "L'économie américaine est en expansion. Aucun signal "
+        "majeur de récession n'est détecté dans les données actuelles."
+    )
+elif score < 60:
+    conclusion = (
+        "Un ralentissement économique est possible. Certains "
+        "indicateurs avancés montrent des signes de tension, "
+        "mais la récession n'est pas le scénario central."
+    )
+elif score < 80:
+    conclusion = (
+        "Le risque de récession est élevé. Plusieurs indicateurs "
+        "clés se détériorent simultanément. Une récession dans "
+        "les 6-12 prochains mois est probable."
+    )
+else:
+    conclusion = (
+        "Le risque de récession est critique. La quasi-totalité "
+        "des indicateurs signalent une contraction économique "
+        "imminente."
+    )
+
+print(f"\n{conclusion}")
+print(f"\nDonnées au : {report.data_as_of}")
+```
