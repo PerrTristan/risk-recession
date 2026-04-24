@@ -10,11 +10,11 @@ Ce script :
   4. Affiche un résumé de ce qui a été collecté
 
 Usage :
-    export FRED_API_KEY="votre_cle_ici"
+    export FRED_API_KEY="9d2cb994a98a24d3aaaa84896e89c866"
     python data/build_fred.py
 
     # Ou avec un fichier .env :
-    echo "FRED_API_KEY=votre_cle_ici" > .env
+    echo "FRED_API_KEY=9d2cb994a98a24d3aaaa84896e89c866" > .env
     python data/build_fred.py
 """
 
